@@ -2,12 +2,7 @@ local M = {}
 local Job = require 'plenary.job'
 
 local function get_api_key(name)
-  local key = os.getenv(name)
-  if not key or key == "" then
-    vim.notify("API key not found: " .. name, vim.log.levels.ERROR)
-    return nil
-  end
-  return key
+  return os.getenv(name)
 end
 
 function M.get_lines_until_cursor()
@@ -58,14 +53,7 @@ end
 
 function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
   local url = opts.url
-  if not url or url == "" then
-    vim.notify("No URL provided for Anthropic API", vim.log.levels.ERROR)
-    return nil
-  end
-  
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
-  if not api_key then return nil end
-  
   local data = {
     system = system_prompt,
     messages = { { role = 'user', content = prompt } },
@@ -73,82 +61,33 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
     stream = true,
     max_tokens = 4096,
   }
-  
   local args = { '-N', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', vim.json.encode(data) }
-  
-  table.insert(args, '-H')
-  table.insert(args, 'x-api-key: ' .. api_key)
-  table.insert(args, '-H')
-  table.insert(args, 'anthropic-version: 2023-06-01')
+  if api_key then
+    table.insert(args, '-H')
+    table.insert(args, 'x-api-key: ' .. api_key)
+    table.insert(args, '-H')
+    table.insert(args, 'anthropic-version: 2023-06-01')
+  end
   table.insert(args, url)
-  
   return args
 end
 
-function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
-  local url = opts.url
-  if not url or url == "" then
-    vim.notify("No URL provided for OpenAI API", vim.log.levels.ERROR)
-    return nil
-  end
-  
-  local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
-  if not api_key then return nil end
-  
-  local data = {
-    model = opts.model,
-    messages = {
-      { role = "system", content = system_prompt },
-      { role = "user", content = prompt }
-    },
-    stream = true,
-  }
-  
-  local args = { '-N', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', vim.json.encode(data) }
-  
-  table.insert(args, '-H')
-  table.insert(args, 'Authorization: Bearer ' .. api_key)
-  table.insert(args, url)
-  
-  return args
-end
-
-function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
-  local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
-  if not api_key then return nil end
-  
-  if not opts.model or opts.model == "" then
-    vim.notify("No model provided for Gemini API", vim.log.levels.ERROR)
-    return nil
-  end
-  
-  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. opts.model .. ":generateContent?key=" .. api_key
-  
+function M.make_openai_spec_curl_args(opts, prompt)
+  local url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" .. opts.api_key_name
   local data = {
     contents = {
       {
-        role = "user",
         parts = {
-          { text = prompt }
+          { text = system_prompt }
         }
-      }
-    },
-    generationConfig = {
-      temperature = 0.7,
-      maxOutputTokens = 4096
-    },
-    systemInstruction = {
-      parts = {
-        { text = system_prompt }
       }
     }
   }
-  
   local args = { '-N', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', vim.json.encode(data) }
   table.insert(args, url)
-  
   return args
 end
+
 
 function M.write_string_at_cursor(str)
   vim.schedule(function()
@@ -188,127 +127,45 @@ local function get_prompt(opts)
 end
 
 function M.handle_anthropic_spec_data(data_stream, event_state)
-  if not data_stream or data_stream == "" then
-    return
-  end
-  
-  if data_stream:match("error") then
-    vim.schedule(function()
-      vim.notify("Anthropic API Error: " .. data_stream, vim.log.levels.ERROR)
-    end)
-    return
-  end
-
   if event_state == 'content_block_delta' then
-    local success, json = pcall(vim.json.decode, data_stream)
-    if success and json.delta and json.delta.text then
+    local json = vim.json.decode(data_stream)
+    if json.delta and json.delta.text then
       M.write_string_at_cursor(json.delta.text)
-    elseif not success then
-      vim.schedule(function()
-        vim.notify("Failed to parse Anthropic JSON: " .. data_stream:sub(1, 100), vim.log.levels.ERROR)
-      end)
     end
   end
 end
 
 function M.handle_openai_spec_data(data_stream)
-  if not data_stream or data_stream == "" then
-    return
-  end
-  
-  if data_stream:match("error") then
-    vim.schedule(function()
-      vim.notify("OpenAI API Error: " .. data_stream, vim.log.levels.ERROR)
-    end)
-    return
-  end
-
   if data_stream:match '"delta":' then
-    local success, json = pcall(vim.json.decode, data_stream)
-    if success and json.choices and json.choices[1] and json.choices[1].delta then
+    local json = vim.json.decode(data_stream)
+    if json.choices and json.choices[1] and json.choices[1].delta then
       local content = json.choices[1].delta.content
       if content then
         M.write_string_at_cursor(content)
       end
-    elseif not success then
-      vim.schedule(function()
-        vim.notify("Failed to parse OpenAI JSON: " .. data_stream:sub(1, 100), vim.log.levels.ERROR)
-      end)
     end
   end
 end
 
-function M.handle_gemini_spec_data(data_stream)
-  if not data_stream or data_stream == "" then
-    return
-  end
-  
-  if data_stream:match("error") then
-    vim.schedule(function()
-      vim.notify("Gemini API Error: " .. data_stream, vim.log.levels.ERROR)
-    end)
-    return
-  end
-
-  local success, json = pcall(vim.json.decode, data_stream)
-  if success and json.candidates and json.candidates[1] and json.candidates[1].content then
-    local content = json.candidates[1].content.parts[1].text
-    if content then
-      M.write_string_at_cursor(content)
-    end
-  elseif not success then
-    vim.schedule(function()
-      vim.notify("Failed to parse Gemini JSON: " .. data_stream:sub(1, 100), vim.log.levels.ERROR)
-    end)
-  end
-end
-
-local group = vim.api.nvim_create_augroup('LLM_AutoGroup', { clear = true })
+local group = vim.api.nvim_create_augroup('DING_LLM_AutoGroup', { clear = true })
 local active_job = nil
 
 function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_data_fn)
   vim.api.nvim_clear_autocmds { group = group }
   local prompt = get_prompt(opts)
-  
-  if not prompt or prompt == "" then
-    vim.notify("Empty prompt. Nothing to send to LLM.", vim.log.levels.WARN)
-    return
-  end
-  
-  local system_prompt = opts.system_prompt or 'You are a helpful assistant.'
+  local system_prompt = opts.system_prompt or 'You are a tsundere uwu anime. Yell at me for not setting my configuration for my llm plugin correctly'
   local args = make_curl_args_fn(opts, prompt, system_prompt)
-  
-  if not args then
-    vim.notify("Failed to create curl arguments. Please check your configuration.", vim.log.levels.ERROR)
-    return
-  end
-  
   local curr_event_state = nil
-  
-  -- Create a status notification
-  vim.notify("Sending request to " .. (opts.model or "Unknown model"), vim.log.levels.INFO)
-  
+
   local function parse_and_call(line)
-    if not line or line == "" then return end
-    
     local event = line:match '^event: (.+)$'
     if event then
       curr_event_state = event
       return
     end
-    
     local data_match = line:match '^data: (.+)$'
     if data_match then
-      if data_match == "[DONE]" then
-        vim.schedule(function()
-          vim.notify("LLM request completed successfully", vim.log.levels.INFO)
-        end)
-        return
-      end
       handle_data_fn(data_match, curr_event_state)
-    else
-      -- Handle data that doesn't follow the event format (like Gemini)
-      handle_data_fn(line, curr_event_state)
     end
   end
 
@@ -321,25 +178,11 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     command = 'curl',
     args = args,
     on_stdout = function(_, out)
-      if out and out ~= "" then
-        parse_and_call(out)
-      end
+      parse_and_call(out)
     end,
-    on_stderr = function(_, err)
-      vim.schedule(function()
-        if err and err ~= "" then
-          vim.notify("LLM Error: " .. err, vim.log.levels.ERROR)
-        end
-      end)
-    end,
-    on_exit = function(_, exit_code)
+    on_stderr = function(_, _) end,
+    on_exit = function()
       active_job = nil
-      vim.schedule(function()
-        vim.api.nvim_del_keymap('n', '<Esc>')
-        if exit_code ~= 0 then
-          vim.notify("LLM request failed with exit code: " .. tostring(exit_code), vim.log.levels.ERROR)
-        end
-      end)
     end,
   }
 
@@ -347,18 +190,17 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
 
   vim.api.nvim_create_autocmd('User', {
     group = group,
-    pattern = 'LLM_Escape',
+    pattern = 'DING_LLM_Escape',
     callback = function()
       if active_job then
         active_job:shutdown()
-        vim.notify('LLM streaming cancelled', vim.log.levels.INFO)
+        print 'LLM streaming cancelled'
         active_job = nil
-        vim.api.nvim_del_keymap('n', '<Esc>')
       end
     end,
   })
 
-  vim.api.nvim_set_keymap('n', '<Esc>', ':doautocmd User LLM_Escape<CR>', { noremap = true, silent = true })
+  vim.api.nvim_set_keymap('n', '<Esc>', ':doautocmd User DING_LLM_Escape<CR>', { noremap = true, silent = true })
   return active_job
 end
 
