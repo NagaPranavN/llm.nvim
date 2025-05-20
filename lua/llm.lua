@@ -278,6 +278,10 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
 end
 
 function M.write_string_at_cursor(str)
+  if not str or str == "" then
+    return
+  end
+  
   vim.schedule(function()
     local current_window = vim.api.nvim_get_current_win()
     local cursor_position = vim.api.nvim_win_get_cursor(current_window)
@@ -347,95 +351,90 @@ function M.handle_openai_spec_data(data_stream)
   end
 end
 
--- Improved Gemini API handler with better JSON parsing
+-- Global variable for accumulated JSON fragments
+M.gemini_accumulated = ""
+
+-- Fixed Gemini API handler
 function M.handle_gemini_spec_data(data_stream)
   M.log_debug("Received Gemini data: " .. data_stream)
   
-  -- Buffer for incomplete JSON chunks
-  if not M.gemini_buffer then
-    M.gemini_buffer = ""
-  end
-
-  -- Accumulate response data
-  M.gemini_buffer = M.gemini_buffer .. data_stream
+  -- Accumulate the data
+  M.gemini_accumulated = M.gemini_accumulated .. data_stream
   
-  -- Try to find complete JSON objects
-  local start_pos = 1
-  local found_valid_json = false
+  -- Find and extract complete JSON objects
+  local extracted_text = ""
+  local start_idx = 1
   
-  while start_pos <= #M.gemini_buffer do
-    -- Find opening and closing braces of a JSON object
-    local json_start = M.gemini_buffer:find('{', start_pos)
-    if not json_start then break end
+  while true do
+    -- Find the next object start
+    local obj_start = M.gemini_accumulated:find("{", start_idx)
+    if not obj_start then break end
     
-    -- Find matching closing brace with proper nesting
-    local nesting = 1
-    local json_end = nil
-    local i = json_start + 1
+    -- Try to find the matching closing brace with proper nesting
+    local depth = 1
+    local obj_end = nil
     
-    while i <= #M.gemini_buffer and nesting > 0 do
-      local char = M.gemini_buffer:sub(i, i)
-      if char == '{' then
-        nesting = nesting + 1
-      elseif char == '}' then
-        nesting = nesting - 1
-        if nesting == 0 then
-          json_end = i
+    for i = obj_start + 1, #M.gemini_accumulated do
+      local char = M.gemini_accumulated:sub(i, i)
+      if char == "{" then
+        depth = depth + 1
+      elseif char == "}" then
+        depth = depth - 1
+        if depth == 0 then
+          obj_end = i
           break
         end
       end
-      i = i + 1
     end
     
-    if json_end then
-      local json_str = M.gemini_buffer:sub(json_start, json_end)
-      local ok, json = pcall(vim.json.decode, json_str)
+    if not obj_end then
+      -- Incomplete JSON object, wait for more data
+      start_idx = obj_start + 1
+    else
+      -- Extract the complete JSON object
+      local json_str = M.gemini_accumulated:sub(obj_start, obj_end)
+      local ok, parsed = pcall(vim.json.decode, json_str)
       
       if ok then
-        found_valid_json = true
-        -- Extract text from candidates
-        if json.candidates and json.candidates[1] and json.candidates[1].content then
-          local parts = json.candidates[1].content.parts
-          if parts and parts[1] and parts[1].text then
-            local text = parts[1].text
-            -- Unescape the JSON string literals
-            text = text:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
-            M.write_string_at_cursor(text)
+        -- Check for text content in the Gemini format
+        if parsed.candidates and parsed.candidates[1] and 
+           parsed.candidates[1].content and parsed.candidates[1].content.parts then
+          for _, part in ipairs(parsed.candidates[1].content.parts) do
+            if part.text then
+              -- Filter out backticks that may be incorrectly included (based on your log)
+              if part.text:match("^```") then
+                -- Skip the code block markers as they appear to be noise in your logs
+              else
+                -- Extract any code or content after removing backticks
+                local cleaned_text = part.text
+                -- Handle cases where there's actual code content (not just backticks)
+                if cleaned_text ~= "" then
+                  extracted_text = extracted_text .. cleaned_text
+                end
+              end
+            end
           end
         end
         
-        -- Continue searching from after this JSON object
-        start_pos = json_end + 1
+        -- Move past this object
+        M.gemini_accumulated = M.gemini_accumulated:sub(obj_end + 1)
+        start_idx = 1  -- Reset to start of remaining buffer
       else
-        -- If not valid JSON, move to next potential start
-        start_pos = json_start + 1
+        -- Invalid JSON, skip to next potential object
+        start_idx = obj_start + 1
       end
-    else
-      -- Incomplete JSON, keep in buffer and wait for more data
-      break
     end
   end
   
-  -- If we found and processed at least one valid JSON, trim the buffer
-  if found_valid_json and json_end then
-    M.gemini_buffer = M.gemini_buffer:sub(json_end + 1)
-  end
-  
-  -- Fallback for non-JSON response parts (if any direct text content present)
-  local text_match = data_stream:match('"text":%s*"([^"]+)"')
-  if text_match then
-    -- Unescape the JSON string literals
-    local text = text_match:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
-    -- Avoid duplicating content we've already extracted from proper JSON parsing
-    if not found_valid_json then
-      M.write_string_at_cursor(text)
-    end
+  -- Output any extracted text
+  if extracted_text ~= "" then
+    M.write_string_at_cursor(extracted_text)
   end
 end
 
 -- Clear Gemini buffer on job completion
 function M.clear_gemini_buffer()
-  M.gemini_buffer = nil
+  M.gemini_accumulated = ""
 end
 
 local group = vim.api.nvim_create_augroup('LLM_AutoGroup', { clear = true })
@@ -470,24 +469,20 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   local response_buffer = ""  -- Buffer for accumulating response chunks
 
   local function parse_and_call(line)
-    -- Add to response buffer
-    response_buffer = response_buffer .. line
-    
-    -- Check for Anthropic event markers
+    -- For Anthropic-style SSE responses (event/data format)
     local event = line:match('^event: (.+)$')
     if event then
       curr_event_state = event
       return
     end
     
-    -- Check for data lines
     local data_match = line:match('^data: (.+)$')
     if data_match then
       handle_data_fn(data_match, curr_event_state)
       return
     end
     
-    -- For APIs that may not use SSE format (like Gemini)
+    -- For non-SSE responses (like Gemini's JSON)
     handle_data_fn(line, curr_event_state)
   end
 
@@ -503,8 +498,11 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     command = 'curl',
     args = args,
     on_stdout = function(_, out)
-      M.log_debug("STDOUT: " .. out)
-      parse_and_call(out)
+      -- Only process non-empty lines
+      if out and out ~= "" then
+        M.log_debug("STDOUT: " .. out)
+        parse_and_call(out)
+      end
     end,
     on_stderr = function(_, err)
       if err and err ~= "" then
@@ -513,7 +511,7 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       end
     end,
     on_exit = function(_, exit_code)
-      -- Process any remaining data in the buffer
+      -- Process any remaining data
       if response_buffer ~= "" then
         handle_data_fn(response_buffer, curr_event_state)
       end
