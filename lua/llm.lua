@@ -191,7 +191,7 @@ function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
     '-H', 'Content-Type: application/json',
     '-H', 'Authorization: Bearer ' .. api_key,
     '-d', encoded_data,
-    '-v',
+    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
@@ -225,7 +225,7 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
     '-H', 'x-api-key: ' .. api_key,
     '-H', 'anthropic-version: 2023-06-01',
     '-d', encoded_data,
-    '-v',
+    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
@@ -270,7 +270,7 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
     '-X', 'POST',
     '-H', 'Content-Type: application/json',
     '-d', encoded_data,
-    '-v',
+    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
@@ -351,23 +351,13 @@ end
 function M.handle_gemini_spec_data(data_stream)
   M.log_debug("Received Gemini data: " .. data_stream)
   
-  -- Skip empty lines or lines that don't contain JSON data
-  if not data_stream or data_stream == "" or not data_stream:match('^{') then
-    return
-  end
-
   local ok, json = pcall(vim.json.decode, data_stream)
   if ok then
     -- Check for different response formats
     if json.candidates and json.candidates[1] and json.candidates[1].content then
       local parts = json.candidates[1].content.parts
-      if parts and #parts > 0 and parts[1].text then
-        local text = parts[1].text
-        -- Remove code block markers if present
-        text = text:gsub('^```%w*\n', ''):gsub('\n```$', '')
-        if text ~= "" then
-          M.write_string_at_cursor(text)
-        end
+      if parts and parts[1] and parts[1].text then
+        M.write_string_at_cursor(parts[1].text)
       end
     end
   elseif not ok then
@@ -401,32 +391,8 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   
   local curr_event_state = nil
   local stderr_lines = {}
-  local response_buffer = {} -- Buffer to accumulate complete response
-  local response_complete = false -- Flag to track if we've received the complete response
 
   local function parse_and_call(line)
-    -- Skip empty lines
-    if not line or line == "" then return end
-    
-    -- For Gemini, we need to collect the complete response
-    if make_curl_args_fn == M.make_gemini_spec_curl_args then
-      if line:match('^{') then
-        response_buffer = {line} -- Start new response
-        response_complete = false
-      elseif not response_complete then
-        table.insert(response_buffer, line)
-      end
-      
-      -- Check if we have the complete response
-      if line:match('}$') then
-        response_complete = true
-        local complete_response = table.concat(response_buffer, '')
-        handle_data_fn(complete_response)
-        response_buffer = {}
-      end
-      return
-    end
-    
     -- Check for Anthropic event markers
     local event = line:match('^event: (.+)$')
     if event then
@@ -439,6 +405,11 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     if data_match then
       handle_data_fn(data_match, curr_event_state)
       return
+    end
+    
+    -- For Gemini API which doesn't use SSE format
+    if line:match('{') then
+      handle_data_fn(line, curr_event_state)
     end
   end
 
