@@ -60,6 +60,71 @@ function M.get_visual_selection()
   return {}
 end
 
+-- Enhanced debug logging
+local debug_buffer = nil
+local debug_window = nil
+
+function M.create_debug_window()
+  -- Create debug buffer if it doesn't exist
+  if not debug_buffer or not vim.api.nvim_buf_is_valid(debug_buffer) then
+    debug_buffer = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_option(debug_buffer, "bufhidden", "hide")
+    vim.api.nvim_buf_set_name(debug_buffer, "LLM Debug Log")
+  end
+  
+  -- Create window if it doesn't exist or isn't valid
+  if not debug_window or not vim.api.nvim_win_is_valid(debug_window) then
+    -- Save current window to return to it later
+    local current_win = vim.api.nvim_get_current_win()
+    
+    -- Create a split window at the bottom
+    vim.cmd('botright split')
+    debug_window = vim.api.nvim_get_current_win()
+    
+    -- Set the buffer for this window
+    vim.api.nvim_win_set_buf(debug_window, debug_buffer)
+    
+    -- Set window height
+    vim.api.nvim_win_set_height(debug_window, 10)
+    
+    -- Return to the original window
+    vim.api.nvim_set_current_win(current_win)
+  end
+  
+  return debug_buffer
+end
+
+function M.log_debug(message)
+  if not debug_buffer or not vim.api.nvim_buf_is_valid(debug_buffer) then
+    M.create_debug_window()
+  end
+  
+  local timestamp = os.date("%H:%M:%S")
+  local formatted_message = "[" .. timestamp .. "] " .. message
+  
+  local lines = vim.split(formatted_message, "\n")
+  local line_count = vim.api.nvim_buf_line_count(debug_buffer)
+  
+  vim.api.nvim_buf_set_option(debug_buffer, "modifiable", true)
+  vim.api.nvim_buf_set_lines(debug_buffer, line_count, line_count, false, lines)
+  vim.api.nvim_buf_set_option(debug_buffer, "modifiable", false)
+  
+  -- Auto-scroll to bottom if debug window exists
+  if debug_window and vim.api.nvim_win_is_valid(debug_window) then
+    vim.api.nvim_win_set_cursor(debug_window, {line_count + #lines, 0})
+  end
+end
+
+-- Command to toggle debug window
+function M.toggle_debug_window()
+  if debug_window and vim.api.nvim_win_is_valid(debug_window) then
+    vim.api.nvim_win_close(debug_window, true)
+    debug_window = nil
+  else
+    M.create_debug_window()
+  end
+end
+
 -- OpenAI API integration
 function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
   local url = opts.url
@@ -79,12 +144,16 @@ function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
     max_tokens = opts.max_tokens or 4096
   }
   
+  local encoded_data = vim.json.encode(data)
+  M.log_debug("OpenAI request data: " .. vim.inspect(data))
+  
   local args = {
     '-N',
     '-X', 'POST',
     '-H', 'Content-Type: application/json',
     '-H', 'Authorization: Bearer ' .. api_key,
-    '-d', vim.json.encode(data),
+    '-d', encoded_data,
+    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
@@ -108,13 +177,17 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
     max_tokens = opts.max_tokens or 4096,
   }
   
+  local encoded_data = vim.json.encode(data)
+  M.log_debug("Anthropic request data: " .. vim.inspect(data))
+  
   local args = {
     '-N',
     '-X', 'POST',
     '-H', 'Content-Type: application/json',
     '-H', 'x-api-key: ' .. api_key,
     '-H', 'anthropic-version: 2023-06-01',
-    '-d', vim.json.encode(data),
+    '-d', encoded_data,
+    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
@@ -151,11 +224,15 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
     }
   }
   
+  local encoded_data = vim.json.encode(data)
+  M.log_debug("Gemini request data: " .. vim.inspect(data))
+  
   local args = {
     '-N',
     '-X', 'POST',
     '-H', 'Content-Type: application/json',
-    '-d', vim.json.encode(data),
+    '-d', encoded_data,
+    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
@@ -203,16 +280,22 @@ end
 
 -- Handle Anthropic API response
 function M.handle_anthropic_spec_data(data_stream, event_state)
+  M.log_debug("Received Anthropic data: " .. data_stream)
+  
   if event_state == 'content_block_delta' then
     local ok, json = pcall(vim.json.decode, data_stream)
     if ok and json.delta and json.delta.text then
       M.write_string_at_cursor(json.delta.text)
+    elseif not ok then
+      M.log_debug("Failed to parse Anthropic JSON: " .. data_stream)
     end
   end
 end
 
 -- Handle OpenAI API response
 function M.handle_openai_spec_data(data_stream)
+  M.log_debug("Received OpenAI data: " .. data_stream)
+  
   if data_stream:match('"delta":') then
     local ok, json = pcall(vim.json.decode, data_stream)
     if ok and json.choices and json.choices[1] and json.choices[1].delta then
@@ -220,12 +303,16 @@ function M.handle_openai_spec_data(data_stream)
       if content then
         M.write_string_at_cursor(content)
       end
+    elseif not ok then
+      M.log_debug("Failed to parse OpenAI JSON: " .. data_stream)
     end
   end
 end
 
 -- Handle Gemini API response
 function M.handle_gemini_spec_data(data_stream)
+  M.log_debug("Received Gemini data: " .. data_stream)
+  
   local ok, json = pcall(vim.json.decode, data_stream)
   if ok then
     -- Check for different response formats
@@ -235,6 +322,8 @@ function M.handle_gemini_spec_data(data_stream)
         M.write_string_at_cursor(parts[1].text)
       end
     end
+  elseif not ok then
+    M.log_debug("Failed to parse Gemini JSON: " .. data_stream)
   end
 end
 
@@ -244,15 +333,24 @@ local active_job = nil
 function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_data_fn)
   vim.api.nvim_clear_autocmds({ group = group })
   
+  -- Ensure debug buffer is created
+  M.create_debug_window()
+  
   local prompt = get_prompt(opts)
   local system_prompt = opts.system_prompt or 'You are a helpful assistant.'
+  
+  M.log_debug("Starting LLM request with model: " .. (opts.model or "unknown"))
+  M.log_debug("API endpoint: " .. (opts.url or "unknown"))
+  
   local args = make_curl_args_fn(opts, prompt, system_prompt)
   
   if not args then
+    M.log_debug("Failed to create curl arguments. Check API key.")
     return
   end
   
   local curr_event_state = nil
+  local stderr_lines = {}
 
   local function parse_and_call(line)
     -- Check for Anthropic event markers
@@ -287,23 +385,31 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     command = 'curl',
     args = args,
     on_stdout = function(_, out)
+      M.log_debug("STDOUT: " .. out)
       parse_and_call(out)
     end,
     on_stderr = function(_, err)
-      vim.schedule(function()
-        -- Fix: Check if err is not nil before concatenating
-        if err then
-          vim.notify("LLM Error: " .. err, vim.log.levels.ERROR)
-        else
-          vim.notify("LLM Error occurred", vim.log.levels.ERROR)
-        end
-      end)
+      if err and err ~= "" then
+        table.insert(stderr_lines, err)
+        M.log_debug("STDERR: " .. err)
+      end
     end,
     on_exit = function(_, exit_code)
       if exit_code ~= 0 then
         vim.schedule(function()
-          vim.notify("LLM request failed with exit code: " .. exit_code, vim.log.levels.ERROR)
+          local err_msg = "LLM request failed with exit code: " .. exit_code
+          if #stderr_lines > 0 then
+            err_msg = err_msg .. "\nErrors:\n" .. table.concat(stderr_lines, "\n")
+          end
+          
+          vim.notify(err_msg, vim.log.levels.ERROR)
+          M.log_debug("Request failed: " .. err_msg)
+          
+          -- Show detailed error in debug window
+          M.log_debug("Curl command: curl " .. table.concat(args, " "))
         end)
+      else
+        M.log_debug("Request completed successfully")
       end
       
       vim.schedule(function()
@@ -336,5 +442,19 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   vim.api.nvim_set_keymap('n', '<Esc>', ':doautocmd User LLM_Escape<CR>', { noremap = true, silent = true })
   return active_job
 end
+
+-- Register commands for debugging
+vim.api.nvim_create_user_command('LLMDebugToggle', function()
+  M.toggle_debug_window()
+end, { desc = 'Toggle LLM debug window' })
+
+vim.api.nvim_create_user_command('LLMDebugClear', function()
+  if debug_buffer and vim.api.nvim_buf_is_valid(debug_buffer) then
+    vim.api.nvim_buf_set_option(debug_buffer, "modifiable", true)
+    vim.api.nvim_buf_set_lines(debug_buffer, 0, -1, false, {})
+    vim.api.nvim_buf_set_option(debug_buffer, "modifiable", false)
+    M.log_debug("Debug log cleared")
+  end
+end, { desc = 'Clear LLM debug log' })
 
 return M
