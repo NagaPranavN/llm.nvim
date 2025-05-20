@@ -159,15 +159,25 @@ local function get_prompt(opts)
 end
 
 function M.handle_anthropic_spec_data(data_stream, event_state)
+  -- Add debug output to inspect the data stream
+  print("Anthropic data received: " .. vim.inspect(data_stream):sub(1, 100) .. "...")
+  
+  -- The rest of the handler
   if event_state == 'content_block_delta' then
     local success, json = pcall(vim.json.decode, data_stream)
     if success and json.delta and json.delta.text then
       M.write_string_at_cursor(json.delta.text)
+    elseif not success then
+      print("Failed to parse Anthropic JSON: " .. tostring(json))
     end
   end
 end
 
 function M.handle_openai_spec_data(data_stream)
+  -- Add debug output to inspect the data stream
+  print("OpenAI data received: " .. vim.inspect(data_stream):sub(1, 100) .. "...")
+  
+  -- The rest of the handler
   if data_stream:match '"delta":' then
     local success, json = pcall(vim.json.decode, data_stream)
     if success and json.choices and json.choices[1] and json.choices[1].delta then
@@ -175,17 +185,25 @@ function M.handle_openai_spec_data(data_stream)
       if content then
         M.write_string_at_cursor(content)
       end
+    elseif not success then
+      print("Failed to parse OpenAI JSON: " .. tostring(json))
     end
   end
 end
 
 function M.handle_gemini_spec_data(data_stream)
+  -- Add debug output to inspect the data stream
+  print("Gemini data received: " .. vim.inspect(data_stream):sub(1, 100) .. "...")
+  
+  -- The rest of the handler
   local success, json = pcall(vim.json.decode, data_stream)
   if success and json.candidates and json.candidates[1] and json.candidates[1].content then
     local content = json.candidates[1].content.parts[1].text
     if content then
       M.write_string_at_cursor(content)
     end
+  elseif not success then
+    print("Failed to parse Gemini JSON: " .. tostring(json))
   end
 end
 
@@ -199,12 +217,21 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   local args = make_curl_args_fn(opts, prompt, system_prompt)
   local curr_event_state = nil
 
+  -- Print debugging information
+  print("Sending request to: " .. opts.url or "Unknown URL")
+  print("Using model: " .. opts.model or "Unknown model")
+  print("API key available: " .. (get_api_key(opts.api_key_name) ~= nil and "Yes" or "No"))
+  
   local function parse_and_call(line)
+    if not line or line == "" then return end
+    
     local event = line:match '^event: (.+)$'
     if event then
       curr_event_state = event
+      print("Event state changed to: " .. event)
       return
     end
+    
     local data_match = line:match '^data: (.+)$'
     if data_match then
       handle_data_fn(data_match, curr_event_state)
@@ -223,22 +250,25 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     command = 'curl',
     args = args,
     on_stdout = function(_, out)
-      parse_and_call(out)
+      if out and out ~= "" then
+        print("Raw response: " .. out:sub(1, 50) .. (out:len() > 50 and "..." or ""))
+        parse_and_call(out)
+      end
     end,
     on_stderr = function(_, err)
       vim.schedule(function()
-        if err then
+        if err and err ~= "" then
           print("LLM Error: " .. err)
         else
           print("LLM Error: Unknown error occurred")
         end
       end)
     end,
-    on_exit = function()
+    on_exit = function(_, exit_code)
       active_job = nil
       vim.schedule(function()
         vim.api.nvim_del_keymap('n', '<Esc>')
-        print("LLM request completed")
+        print("LLM request completed with exit code: " .. tostring(exit_code))
       end)
     end,
   }
