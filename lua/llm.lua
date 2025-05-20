@@ -222,6 +222,21 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   vim.api.nvim_clear_autocmds({ group = group })
   local prompt = get_prompt(opts)
   local system_prompt = opts.system_prompt or 'You are a helpful assistant.'
+  
+  -- Determine which curl args function to use based on model type
+  if make_curl_args_fn == nil then
+    if opts.url and opts.url:match("anthropic") then
+      make_curl_args_fn = M.make_anthropic_spec_curl_args
+      handle_data_fn = handle_data_fn or M.handle_anthropic_spec_data
+    elseif opts.model and opts.model:match("gemini") then
+      make_curl_args_fn = M.make_gemini_spec_curl_args
+      handle_data_fn = handle_data_fn or M.handle_gemini_spec_data
+    else
+      make_curl_args_fn = M.make_openai_spec_curl_args
+      handle_data_fn = handle_data_fn or M.handle_openai_spec_data
+    end
+  end
+  
   local args = make_curl_args_fn(opts, prompt, system_prompt)
   
   if not args then
