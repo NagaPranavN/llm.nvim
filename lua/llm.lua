@@ -291,7 +291,12 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     end,
     on_stderr = function(_, err)
       vim.schedule(function()
-        vim.notify("LLM Error: " .. err, vim.log.levels.ERROR)
+        -- Fix: Check if err is not nil before concatenating
+        if err then
+          vim.notify("LLM Error: " .. err, vim.log.levels.ERROR)
+        else
+          vim.notify("LLM Error occurred", vim.log.levels.ERROR)
+        end
       end)
     end,
     on_exit = function(_, exit_code)
@@ -304,8 +309,10 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       vim.schedule(function()
         vim.api.nvim_echo({ { "", "" } }, false, {})
         vim.cmd("redraw")
-        vim.api.nvim_set_keymap('n', '<Esc>', '', { noremap = true, silent = true })
-        vim.api.nvim_del_keymap('n', '<Esc>')
+        -- Safely remove the Escape key binding
+        pcall(function()
+          vim.api.nvim_del_keymap('n', '<Esc>')
+        end)
       end)
       
       active_job = nil
