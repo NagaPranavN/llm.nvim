@@ -63,7 +63,9 @@ end
 -- Enhanced debug logging
 local debug_buffer = nil
 local debug_window = nil
+local debug_log_queue = {}
 
+-- Function to safely create debug window (only called in UI context)
 function M.create_debug_window()
   -- Create debug buffer if it doesn't exist
   if not debug_buffer or not vim.api.nvim_buf_is_valid(debug_buffer) then
@@ -91,28 +93,64 @@ function M.create_debug_window()
     vim.api.nvim_set_current_win(current_win)
   end
   
+  -- Process any queued messages
+  if #debug_log_queue > 0 then
+    vim.schedule(function()
+      if debug_buffer and vim.api.nvim_buf_is_valid(debug_buffer) then
+        vim.api.nvim_buf_set_option(debug_buffer, "modifiable", true)
+        local line_count = vim.api.nvim_buf_line_count(debug_buffer)
+        for _, msg in ipairs(debug_log_queue) do
+          local lines = vim.split(msg, "\n")
+          vim.api.nvim_buf_set_lines(debug_buffer, line_count, line_count, false, lines)
+          line_count = line_count + #lines
+        end
+        vim.api.nvim_buf_set_option(debug_buffer, "modifiable", false)
+        
+        -- Auto-scroll to bottom if debug window exists
+        if debug_window and vim.api.nvim_win_is_valid(debug_window) then
+          vim.api.nvim_win_set_cursor(debug_window, {line_count, 0})
+        end
+      end
+      debug_log_queue = {}
+    end)
+  end
+  
   return debug_buffer
 end
 
+-- Safe debug logging function that can be used in any context
 function M.log_debug(message)
-  if not debug_buffer or not vim.api.nvim_buf_is_valid(debug_buffer) then
-    M.create_debug_window()
-  end
-  
   local timestamp = os.date("%H:%M:%S")
   local formatted_message = "[" .. timestamp .. "] " .. message
   
-  local lines = vim.split(formatted_message, "\n")
-  local line_count = vim.api.nvim_buf_line_count(debug_buffer)
+  -- Queue the message
+  table.insert(debug_log_queue, formatted_message)
   
-  vim.api.nvim_buf_set_option(debug_buffer, "modifiable", true)
-  vim.api.nvim_buf_set_lines(debug_buffer, line_count, line_count, false, lines)
-  vim.api.nvim_buf_set_option(debug_buffer, "modifiable", false)
-  
-  -- Auto-scroll to bottom if debug window exists
-  if debug_window and vim.api.nvim_win_is_valid(debug_window) then
-    vim.api.nvim_win_set_cursor(debug_window, {line_count + #lines, 0})
-  end
+  -- Schedule the actual UI update for later
+  vim.schedule(function()
+    if #debug_log_queue > 0 then
+      if not debug_buffer or not vim.api.nvim_buf_is_valid(debug_buffer) then
+        M.create_debug_window()
+      else
+        -- Process the queue directly
+        vim.api.nvim_buf_set_option(debug_buffer, "modifiable", true)
+        local line_count = vim.api.nvim_buf_line_count(debug_buffer)
+        for _, msg in ipairs(debug_log_queue) do
+          local lines = vim.split(msg, "\n")
+          vim.api.nvim_buf_set_lines(debug_buffer, line_count, line_count, false, lines)
+          line_count = line_count + #lines
+        end
+        vim.api.nvim_buf_set_option(debug_buffer, "modifiable", false)
+        
+        -- Auto-scroll to bottom if debug window exists
+        if debug_window and vim.api.nvim_win_is_valid(debug_window) then
+          vim.api.nvim_win_set_cursor(debug_window, {line_count, 0})
+        end
+        
+        debug_log_queue = {}
+      end
+    end
+  end)
 end
 
 -- Command to toggle debug window
@@ -334,7 +372,9 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   vim.api.nvim_clear_autocmds({ group = group })
   
   -- Ensure debug buffer is created
-  M.create_debug_window()
+  vim.schedule(function()
+    M.create_debug_window()
+  end)
   
   local prompt = get_prompt(opts)
   local system_prompt = opts.system_prompt or 'You are a helpful assistant.'
