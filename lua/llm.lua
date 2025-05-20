@@ -227,7 +227,11 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     end,
     on_stderr = function(_, err)
       vim.schedule(function()
-        print("LLM Error: " .. err)
+        if err then
+          print("LLM Error: " .. err)
+        else
+          print("LLM Error: Unknown error occurred")
+        end
       end)
     end,
     on_exit = function()
