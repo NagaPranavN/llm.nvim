@@ -191,7 +191,7 @@ function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
     '-H', 'Content-Type: application/json',
     '-H', 'Authorization: Bearer ' .. api_key,
     '-d', encoded_data,
-    '-v', -- Add verbose flag for more detailed error information
+    '-v',
     url
   }
   
@@ -225,7 +225,7 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
     '-H', 'x-api-key: ' .. api_key,
     '-H', 'anthropic-version: 2023-06-01',
     '-d', encoded_data,
-    '-v', -- Add verbose flag for more detailed error information
+    '-v',
     url
   }
   
@@ -270,7 +270,7 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
     '-X', 'POST',
     '-H', 'Content-Type: application/json',
     '-d', encoded_data,
-    '-v', -- Add verbose flag for more detailed error information
+    '-v',
     url
   }
   
@@ -361,11 +361,13 @@ function M.handle_gemini_spec_data(data_stream)
     -- Check for different response formats
     if json.candidates and json.candidates[1] and json.candidates[1].content then
       local parts = json.candidates[1].content.parts
-      if parts and parts[1] and parts[1].text then
+      if parts and #parts > 0 and parts[1].text then
         local text = parts[1].text
         -- Remove code block markers if present
         text = text:gsub('^```%w*\n', ''):gsub('\n```$', '')
-        M.write_string_at_cursor(text)
+        if text ~= "" then
+          M.write_string_at_cursor(text)
+        end
       end
     end
   elseif not ok then
@@ -399,7 +401,7 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   
   local curr_event_state = nil
   local stderr_lines = {}
-  local response_buffer = {} -- Buffer to accumulate complete response for Gemini
+  local response_buffer = {} -- Buffer to accumulate complete response
   local response_complete = false -- Flag to track if we've received the complete response
 
   local function parse_and_call(line)
