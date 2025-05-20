@@ -17,26 +17,26 @@ function M.get_lines_until_cursor()
 end
 
 function M.get_visual_selection()
-  local _, srow, scol = unpack(vim.fn.getpos('v'))
-  local _, erow, ecol = unpack(vim.fn.getpos('.'))
+  local _, srow, scol = unpack(vim.fn.getpos 'v')
+  local _, erow, ecol = unpack(vim.fn.getpos '.')
 
-  if vim.fn.mode() == 'V' then -- Visual line mode
+  if vim.fn.mode() == 'V' then
     if srow > erow then
-      return table.concat(vim.api.nvim_buf_get_lines(0, erow - 1, srow, true), '\n')
+      return vim.api.nvim_buf_get_lines(0, erow - 1, srow, true)
     else
-      return table.concat(vim.api.nvim_buf_get_lines(0, srow - 1, erow, true), '\n')
+      return vim.api.nvim_buf_get_lines(0, srow - 1, erow, true)
     end
   end
 
-  if vim.fn.mode() == 'v' then -- Visual character mode
+  if vim.fn.mode() == 'v' then
     if srow < erow or (srow == erow and scol <= ecol) then
-      return table.concat(vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1, ecol, {}), '\n')
+      return vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1, ecol, {})
     else
-      return table.concat(vim.api.nvim_buf_get_text(0, erow - 1, ecol - 1, srow - 1, scol, {}), '\n')
+      return vim.api.nvim_buf_get_text(0, erow - 1, ecol - 1, srow - 1, scol, {})
     end
   end
 
-  if vim.fn.mode() == '\22' then -- Visual block mode
+  if vim.fn.mode() == '\22' then
     local lines = {}
     if srow > erow then
       srow, erow = erow, srow
@@ -45,107 +45,49 @@ function M.get_visual_selection()
       scol, ecol = ecol, scol
     end
     for i = srow, erow do
-      table.insert(lines, vim.api.nvim_buf_get_text(0, i - 1, math.min(scol - 1, vim.api.nvim_buf_get_lines(0, i - 1, i, true)[1]:len()), i - 1, math.min(ecol, vim.api.nvim_buf_get_lines(0, i - 1, i, true)[1]:len()), {})[1])
+      table.insert(lines, vim.api.nvim_buf_get_text(0, i - 1, math.min(scol - 1, ecol), i - 1, math.max(scol - 1, ecol), {})[1])
     end
-    return table.concat(lines, '\n')
+    return lines
   end
-  
-  return nil
 end
 
 function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
   local url = opts.url
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
   local data = {
-    model = opts.model or "claude-3-7-sonnet-20250219", -- default model
-    max_tokens = opts.max_tokens or 1024, -- set max tokens if provided, default is 1024
-    messages = {},
-  }
-  
-  -- Add system prompt if provided
-  if system_prompt and system_prompt ~= "" then
-    table.insert(data.messages, { role = 'system', content = system_prompt })
-  end
-  
-  -- Add user prompt
-  table.insert(data.messages, { role = 'user', content = prompt })
-
-  -- Construct the curl command
-  local args = {
-    '-X', 'POST',
-    '-H', 'x-api-key: ' .. api_key, -- API key header
-    '-H', 'anthropic-version: 2023-06-01', -- version header
-    '-H', 'Content-Type: application/json', -- content type header
-    '-d', vim.fn.json_encode(data), -- data body (encoded JSON)
-    url -- URL to hit
-  }
-
-  return args
-end
-
-function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
-  local url = opts.url
-  local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
-  local data = {
-    messages = {},
+    system = system_prompt,
+    messages = { { role = 'user', content = prompt } },
     model = opts.model,
-    temperature = opts.temperature or 0.7,
     stream = true,
+    max_tokens = 4096,
   }
-  
-  -- Add system prompt if provided
-  if system_prompt and system_prompt ~= "" then
-    table.insert(data.messages, { role = 'system', content = system_prompt })
-  end
-  
-  -- Add user prompt
-  table.insert(data.messages, { role = 'user', content = prompt })
-  
   local args = { '-N', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', vim.json.encode(data) }
   if api_key then
     table.insert(args, '-H')
-    table.insert(args, 'Authorization: Bearer ' .. api_key)
+    table.insert(args, 'x-api-key: ' .. api_key)
+    table.insert(args, '-H')
+    table.insert(args, 'anthropic-version: 2023-06-01')
   end
   table.insert(args, url)
   return args
 end
 
-function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
-  local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
-  if not api_key then
-    error("API key not found for Gemini")
-    return nil
-  end
-  
-  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. opts.model .. ":generateContent?key=" .. api_key
-  
-  local parts = { { text = prompt } }
-  
+function M.make_openai_spec_curl_args(opts, prompt)
+  local url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" .. opts.api_key_name
   local data = {
     contents = {
       {
-        parts = parts,
+        parts = {
+          { text = system_prompt }
+        }
       }
     }
   }
-  
-  -- If system prompt is provided, add it to the request
-  if system_prompt and system_prompt ~= "" then
-    table.insert(data.contents, 1, {
-      parts = { { text = system_prompt }, },
-      role = "system"
-    })
-  }
-  
-  local args = {
-    '-X', 'POST',
-    '-H', 'Content-Type: application/json',
-    '-d', vim.json.encode(data),
-    url
-  }
-  
+  local args = { '-N', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', vim.json.encode(data) }
+  table.insert(args, url)
   return args
 end
+
 
 function M.write_string_at_cursor(str)
   vim.schedule(function()
@@ -170,10 +112,10 @@ local function get_prompt(opts)
   local prompt = ''
 
   if visual_lines then
-    prompt = visual_lines
+    prompt = table.concat(visual_lines, '\n')
     if replace then
-      vim.api.nvim_command('normal! d')
-      vim.api.nvim_command('normal! k')
+      vim.api.nvim_command 'normal! d'
+      vim.api.nvim_command 'normal! k'
     else
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>', false, true, true), 'nx', false)
     end
@@ -186,17 +128,17 @@ end
 
 function M.handle_anthropic_spec_data(data_stream, event_state)
   if event_state == 'content_block_delta' then
-    local success, json = pcall(vim.json.decode, data_stream)
-    if success and json.delta and json.delta.text then
+    local json = vim.json.decode(data_stream)
+    if json.delta and json.delta.text then
       M.write_string_at_cursor(json.delta.text)
     end
   end
 end
 
 function M.handle_openai_spec_data(data_stream)
-  if data_stream:match('"delta":') then
-    local success, json = pcall(vim.json.decode, data_stream)
-    if success and json.choices and json.choices[1] and json.choices[1].delta then
+  if data_stream:match '"delta":' then
+    local json = vim.json.decode(data_stream)
+    if json.choices and json.choices[1] and json.choices[1].delta then
       local content = json.choices[1].delta.content
       if content then
         M.write_string_at_cursor(content)
@@ -205,44 +147,25 @@ function M.handle_openai_spec_data(data_stream)
   end
 end
 
-function M.handle_gemini_spec_data(data_stream)
-  local success, json = pcall(vim.json.decode, data_stream)
-  if success and json.candidates and json.candidates[1] and json.candidates[1].content and 
-     json.candidates[1].content.parts and json.candidates[1].content.parts[1] and 
-     json.candidates[1].content.parts[1].text then
-    local content = json.candidates[1].content.parts[1].text
-    M.write_string_at_cursor(content)
-  end
-end
-
-local group = vim.api.nvim_create_augroup('LLM_AutoGroup', { clear = true })
+local group = vim.api.nvim_create_augroup('DING_LLM_AutoGroup', { clear = true })
 local active_job = nil
 
 function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_data_fn)
-  vim.api.nvim_clear_autocmds({ group = group })
+  vim.api.nvim_clear_autocmds { group = group }
   local prompt = get_prompt(opts)
-  local system_prompt = opts.system_prompt or 'You are a helpful assistant.'
+  local system_prompt = opts.system_prompt or 'You are a tsundere uwu anime. Yell at me for not setting my configuration for my llm plugin correctly'
   local args = make_curl_args_fn(opts, prompt, system_prompt)
-  
-  if not args then
-    vim.notify("Failed to create curl arguments", vim.log.levels.ERROR)
-    return nil
-  end
-  
   local curr_event_state = nil
 
   local function parse_and_call(line)
-    local event = line:match('^event: (.+)$')
+    local event = line:match '^event: (.+)$'
     if event then
       curr_event_state = event
       return
     end
-    local data_match = line:match('^data: (.+)$')
+    local data_match = line:match '^data: (.+)$'
     if data_match then
       handle_data_fn(data_match, curr_event_state)
-    elseif not line:match('^%s*$') then -- If not an empty line and not starting with data:
-      -- For non-streaming APIs like Gemini
-      handle_data_fn(line, curr_event_state)
     end
   end
 
@@ -251,42 +174,33 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     active_job = nil
   end
 
-  active_job = Job:new({
+  active_job = Job:new {
     command = 'curl',
     args = args,
     on_stdout = function(_, out)
       parse_and_call(out)
     end,
-    on_stderr = function(_, err)
-      vim.schedule(function()
-        vim.notify("LLM Error: " .. err, vim.log.levels.ERROR)
-      end)
-    end,
-    on_exit = function(j, return_val)
-      if return_val ~= 0 then
-        vim.schedule(function()
-          vim.notify("LLM job failed with code " .. return_val, vim.log.levels.ERROR)
-        end)
-      end
+    on_stderr = function(_, _) end,
+    on_exit = function()
       active_job = nil
     end,
-  })
+  }
 
   active_job:start()
 
   vim.api.nvim_create_autocmd('User', {
     group = group,
-    pattern = 'LLM_Escape',
+    pattern = 'DING_LLM_Escape',
     callback = function()
       if active_job then
         active_job:shutdown()
-        vim.notify('LLM streaming cancelled', vim.log.levels.INFO)
+        print 'LLM streaming cancelled'
         active_job = nil
       end
     end,
   })
 
-  vim.api.nvim_set_keymap('n', '<Esc>', ':doautocmd User LLM_Escape<CR>', { noremap = true, silent = true })
+  vim.api.nvim_set_keymap('n', '<Esc>', ':doautocmd User DING_LLM_Escape<CR>', { noremap = true, silent = true })
   return active_job
 end
 
