@@ -400,13 +400,24 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   local curr_event_state = nil
   local stderr_lines = {}
   local response_buffer = {} -- Buffer to accumulate complete response for Gemini
+  local response_complete = false -- Flag to track if we've received the complete response
 
   local function parse_and_call(line)
+    -- Skip empty lines
+    if not line or line == "" then return end
+    
     -- For Gemini, we need to collect the complete response
     if make_curl_args_fn == M.make_gemini_spec_curl_args then
-      table.insert(response_buffer, line)
+      if line:match('^{') then
+        response_buffer = {line} -- Start new response
+        response_complete = false
+      elseif not response_complete then
+        table.insert(response_buffer, line)
+      end
+      
       -- Check if we have the complete response
       if line:match('}$') then
+        response_complete = true
         local complete_response = table.concat(response_buffer, '')
         handle_data_fn(complete_response)
         response_buffer = {}
