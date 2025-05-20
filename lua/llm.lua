@@ -347,61 +347,95 @@ function M.handle_openai_spec_data(data_stream)
   end
 end
 
--- Handle Gemini API response with improved parsing
+-- Improved Gemini API handler with better JSON parsing
 function M.handle_gemini_spec_data(data_stream)
   M.log_debug("Received Gemini data: " .. data_stream)
   
-  -- Try to extract text with json decoding first
-  local ok, json = pcall(vim.json.decode, data_stream)
-  if ok then
-    if json.candidates and json.candidates[1] and json.candidates[1].content then
-      local parts = json.candidates[1].content.parts
-      if parts and parts[1] and parts[1].text then
-        local text = parts[1].text
-        M.write_string_at_cursor(text)
-        return
+  -- Buffer for incomplete JSON chunks
+  if not M.gemini_buffer then
+    M.gemini_buffer = ""
+  end
+
+  -- Accumulate response data
+  M.gemini_buffer = M.gemini_buffer .. data_stream
+  
+  -- Try to find complete JSON objects
+  local start_pos = 1
+  local found_valid_json = false
+  
+  while start_pos <= #M.gemini_buffer do
+    -- Find opening and closing braces of a JSON object
+    local json_start = M.gemini_buffer:find('{', start_pos)
+    if not json_start then break end
+    
+    -- Find matching closing brace with proper nesting
+    local nesting = 1
+    local json_end = nil
+    local i = json_start + 1
+    
+    while i <= #M.gemini_buffer and nesting > 0 do
+      local char = M.gemini_buffer:sub(i, i)
+      if char == '{' then
+        nesting = nesting + 1
+      elseif char == '}' then
+        nesting = nesting - 1
+        if nesting == 0 then
+          json_end = i
+          break
+        end
       end
+      i = i + 1
+    end
+    
+    if json_end then
+      local json_str = M.gemini_buffer:sub(json_start, json_end)
+      local ok, json = pcall(vim.json.decode, json_str)
+      
+      if ok then
+        found_valid_json = true
+        -- Extract text from candidates
+        if json.candidates and json.candidates[1] and json.candidates[1].content then
+          local parts = json.candidates[1].content.parts
+          if parts and parts[1] and parts[1].text then
+            local text = parts[1].text
+            -- Unescape the JSON string literals
+            text = text:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
+            M.write_string_at_cursor(text)
+          end
+        end
+        
+        -- Continue searching from after this JSON object
+        start_pos = json_end + 1
+      else
+        -- If not valid JSON, move to next potential start
+        start_pos = json_start + 1
+      end
+    else
+      -- Incomplete JSON, keep in buffer and wait for more data
+      break
     end
   end
   
-  -- Fallback to regex pattern matching if JSON parsing failed
+  -- If we found and processed at least one valid JSON, trim the buffer
+  if found_valid_json and json_end then
+    M.gemini_buffer = M.gemini_buffer:sub(json_end + 1)
+  end
+  
+  -- Fallback for non-JSON response parts (if any direct text content present)
   local text_match = data_stream:match('"text":%s*"([^"]+)"')
   if text_match then
     -- Unescape the JSON string literals
     local text = text_match:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
-    M.write_string_at_cursor(text)
-    return
-  end
-  
-  -- More advanced pattern matching for larger chunks
-  if data_stream:find('"text"') then
-    local start_idx = data_stream:find('"text":%s*"')
-    if start_idx then
-      start_idx = start_idx + data_stream:sub(start_idx):find('"', 1, true)
-      local end_idx = nil
-      local escaped = false
-      
-      -- Find the closing quote for the text field with proper escaping handling
-      for i = start_idx + 1, #data_stream do
-        local char = data_stream:sub(i, i)
-        if char == '\\' then
-          escaped = not escaped
-        elseif char == '"' and not escaped then
-          end_idx = i - 1
-          break
-        else
-          escaped = false
-        end
-      end
-      
-      if end_idx and end_idx > start_idx then
-        local text = data_stream:sub(start_idx + 1, end_idx)
-        -- Unescape the JSON string literals
-        text = text:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
-        M.write_string_at_cursor(text)
-      end
+    -- Avoid duplicating content we've already extracted from proper JSON parsing
+    if not found_valid_json then
+      M.write_string_at_cursor(text)
     end
   end
+end
+
+-- Clear Gemini buffer on job completion
+function M.clear_gemini_buffer()
+  M.gemini_buffer = nil
 end
 
 local group = vim.api.nvim_create_augroup('LLM_AutoGroup', { clear = true })
@@ -409,6 +443,9 @@ local active_job = nil
 
 function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_data_fn)
   vim.api.nvim_clear_autocmds({ group = group })
+  
+  -- Clear any Gemini buffer from previous runs
+  M.clear_gemini_buffer()
   
   -- Ensure debug buffer is created
   vim.schedule(function()
@@ -430,8 +467,12 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   
   local curr_event_state = nil
   local stderr_lines = {}
+  local response_buffer = ""  -- Buffer for accumulating response chunks
 
   local function parse_and_call(line)
+    -- Add to response buffer
+    response_buffer = response_buffer .. line
+    
     -- Check for Anthropic event markers
     local event = line:match('^event: (.+)$')
     if event then
@@ -446,7 +487,7 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       return
     end
     
-    -- For Gemini API which may not use SSE format
+    -- For APIs that may not use SSE format (like Gemini)
     handle_data_fn(line, curr_event_state)
   end
 
@@ -472,6 +513,14 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       end
     end,
     on_exit = function(_, exit_code)
+      -- Process any remaining data in the buffer
+      if response_buffer ~= "" then
+        handle_data_fn(response_buffer, curr_event_state)
+      end
+      
+      -- Clear the Gemini buffer
+      M.clear_gemini_buffer()
+      
       if exit_code ~= 0 then
         vim.schedule(function()
           local err_msg = "LLM request failed with exit code: " .. exit_code
