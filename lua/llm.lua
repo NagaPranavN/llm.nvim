@@ -122,8 +122,7 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
     return nil
   end
   
-  -- Modify the URL to use streaming mode
-  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. opts.model .. ":streamGenerateContent?key=" .. api_key
+  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. opts.model .. ":generateContent?key=" .. api_key
   
   local data = {
     contents = {
@@ -251,25 +250,16 @@ function M.handle_gemini_spec_data(data_stream)
     return
   end
 
-  -- Handle streaming response format
   local success, json = pcall(vim.json.decode, data_stream)
-  if success then
-    -- Process streaming chunk responses
-    if json.candidates and json.candidates[1] and json.candidates[1].content then
-      local content = json.candidates[1].content.parts
-      if content and #content > 0 and content[1].text then
-        M.write_string_at_cursor(content[1].text)
-      end
+  if success and json.candidates and json.candidates[1] and json.candidates[1].content then
+    local content = json.candidates[1].content.parts[1].text
+    if content then
+      M.write_string_at_cursor(content)
     end
-  else
-    -- Some chunk data might be incomplete JSON, which is expected in streaming
-    -- No need to notify on every chunk decode failure
-    -- Log only serious errors
-    if data_stream:match("^{") and data_stream:match("}$") then
-      vim.schedule(function()
-        vim.notify("Failed to parse Gemini JSON: " .. data_stream:sub(1, 100), vim.log.levels.ERROR)
-      end)
-    end
+  elseif not success then
+    vim.schedule(function()
+      vim.notify("Failed to parse Gemini JSON: " .. data_stream:sub(1, 100), vim.log.levels.ERROR)
+    end)
   end
 end
 
@@ -317,7 +307,7 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       end
       handle_data_fn(data_match, curr_event_state)
     else
-      -- Gemini streams complete JSON objects, process them directly
+      -- Handle data that doesn't follow the event format (like Gemini)
       handle_data_fn(line, curr_event_state)
     end
   end
