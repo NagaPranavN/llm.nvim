@@ -55,20 +55,21 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
   local url = opts.url
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
   local data = {
-    system = system_prompt,
-    messages = { { role = 'user', content = prompt } },
-    model = opts.model,
-    stream = true,
-    max_tokens = 4096,
+    model = opts.model or "claude-3-7-sonnet-20250219",  -- default model
+    max_tokens = opts.max_tokens or 1024,  -- set max tokens if provided, default is 1024
+    messages = { { role = 'user', content = prompt } },  -- the user prompt
   }
-  local args = { '-N', '-X', 'POST', '-H', 'Content-Type: application/json', '-d', vim.json.encode(data) }
-  if api_key then
-    table.insert(args, '-H')
-    table.insert(args, 'x-api-key: ' .. api_key)
-    table.insert(args, '-H')
-    table.insert(args, 'anthropic-version: 2023-06-01')
-  end
-  table.insert(args, url)
+
+  -- Construct the curl command
+  local args = {
+    '-X', 'POST',
+    '-H', 'x-api-key: ' .. api_key,  -- API key header
+    '-H', 'anthropic-version: 2023-06-01',  -- version header
+    '-H', 'Content-Type: application/json',  -- content type header
+    '-d', vim.fn.json_encode(data),  -- data body (encoded JSON)
+    url  -- URL to hit
+  }
+
   return args
 end
 
