@@ -351,43 +351,55 @@ end
 function M.handle_gemini_spec_data(data_stream)
   M.log_debug("Received Gemini data: " .. data_stream)
   
-  -- Buffer to accumulate JSON data
-  local gemini_buffer = ""
+  -- Try to extract text with json decoding first
+  local ok, json = pcall(vim.json.decode, data_stream)
+  if ok then
+    if json.candidates and json.candidates[1] and json.candidates[1].content then
+      local parts = json.candidates[1].content.parts
+      if parts and parts[1] and parts[1].text then
+        local text = parts[1].text
+        M.write_string_at_cursor(text)
+        return
+      end
+    end
+  end
   
-  -- Process complete JSON objects
-  if data_stream then
-    -- Sometimes Gemini returns multiple JSON objects in one stream
-    -- or partial objects that need to be accumulated
-    gemini_buffer = gemini_buffer .. data_stream
-    
-    -- Try parsing different parts of the response to extract text content
-    local text = nil
-    
-    -- First approach: Try to parse the complete JSON
-    local ok, json = pcall(vim.json.decode, gemini_buffer)
-    if ok then
-      -- Extract text from a complete response
-      if json.candidates and json.candidates[1] and json.candidates[1].content then
-        local parts = json.candidates[1].content.parts
-        if parts and parts[1] and parts[1].text then
-          text = parts[1].text
+  -- Fallback to regex pattern matching if JSON parsing failed
+  local text_match = data_stream:match('"text":%s*"([^"]+)"')
+  if text_match then
+    -- Unescape the JSON string literals
+    local text = text_match:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
+    M.write_string_at_cursor(text)
+    return
+  end
+  
+  -- More advanced pattern matching for larger chunks
+  if data_stream:find('"text"') then
+    local start_idx = data_stream:find('"text":%s*"')
+    if start_idx then
+      start_idx = start_idx + data_stream:sub(start_idx):find('"', 1, true)
+      local end_idx = nil
+      local escaped = false
+      
+      -- Find the closing quote for the text field with proper escaping handling
+      for i = start_idx + 1, #data_stream do
+        local char = data_stream:sub(i, i)
+        if char == '\\' then
+          escaped = not escaped
+        elseif char == '"' and not escaped then
+          end_idx = i - 1
+          break
+        else
+          escaped = false
         end
       end
       
-      -- Reset buffer after successful parse
-      gemini_buffer = ""
-    else
-      -- Second approach: Try to extract text using pattern matching
-      -- Look for text field in stream
-      local text_match = data_stream:match('"text":%s*"([^"]+)"')
-      if text_match then
-        text = text_match:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
+      if end_idx and end_idx > start_idx then
+        local text = data_stream:sub(start_idx + 1, end_idx)
+        -- Unescape the JSON string literals
+        text = text:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
+        M.write_string_at_cursor(text)
       end
-    end
-    
-    -- Write the extracted text if found
-    if text then
-      M.write_string_at_cursor(text)
     end
   end
 end
