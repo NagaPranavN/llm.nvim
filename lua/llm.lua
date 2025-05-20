@@ -232,7 +232,7 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
   return args
 end
 
--- Gemini API integration
+-- Improved Gemini API integration
 function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
   
@@ -347,61 +347,116 @@ function M.handle_openai_spec_data(data_stream)
   end
 end
 
--- Handle Gemini API response with improved parsing
+-- Completely rewritten Gemini API response handler with robust text extraction
 function M.handle_gemini_spec_data(data_stream)
   M.log_debug("Received Gemini data: " .. data_stream)
   
-  -- Try to extract text with json decoding first
+  -- Skip empty lines
+  if data_stream == nil or data_stream == "" or data_stream == "[DONE]" then
+    return
+  end
+  
+  -- First approach: Try standard JSON parsing
   local ok, json = pcall(vim.json.decode, data_stream)
   if ok then
+    -- Process properly formatted JSON response
     if json.candidates and json.candidates[1] and json.candidates[1].content then
       local parts = json.candidates[1].content.parts
       if parts and parts[1] and parts[1].text then
         local text = parts[1].text
+        -- Clean up text - remove leading/trailing quotes if present
+        text = text:gsub('^%s*"(.-)"%s*$', '%1')
+        -- Unescape any JSON escapes
+        text = text:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
         M.write_string_at_cursor(text)
         return
       end
     end
+    
+    -- Check if it's a different JSON format
+    if json.text then
+      local text = json.text
+      text = text:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
+      M.write_string_at_cursor(text)
+      return
+    end
   end
   
-  -- Fallback to regex pattern matching if JSON parsing failed
-  local text_match = data_stream:match('"text":%s*"([^"]+)"')
+  -- Second approach: Extract text field using JSON path extraction
+  local text_pattern = '"text"%s*:%s*"(.-[^\\])"'
+  local text_match = data_stream:match(text_pattern)
   if text_match then
     -- Unescape the JSON string literals
-    local text = text_match:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
+    local text = text_match:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
     M.write_string_at_cursor(text)
     return
   end
   
-  -- More advanced pattern matching for larger chunks
-  if data_stream:find('"text"') then
-    local start_idx = data_stream:find('"text":%s*"')
-    if start_idx then
-      start_idx = start_idx + data_stream:sub(start_idx):find('"', 1, true)
-      local end_idx = nil
+  -- Third approach: Handle multiple chunks by finding text patterns
+  -- This handles cases where the response has multiple text chunks or is malformed
+  local function extract_text_chunks(input_str)
+    local chunks = {}
+    local start_pos = 1
+    
+    while true do
+      local text_start = input_str:find('"text"', start_pos, true)
+      if not text_start then break end
+      
+      local colon_pos = input_str:find(':', text_start, true)
+      if not colon_pos then break end
+      
+      local quote_start = input_str:find('"', colon_pos + 1, true)
+      if not quote_start then break end
+      
+      local quote_end = nil
+      local pos = quote_start + 1
       local escaped = false
       
-      -- Find the closing quote for the text field with proper escaping handling
-      for i = start_idx + 1, #data_stream do
-        local char = data_stream:sub(i, i)
+      while pos <= #input_str do
+        local char = input_str:sub(pos, pos)
         if char == '\\' then
           escaped = not escaped
         elseif char == '"' and not escaped then
-          end_idx = i - 1
+          quote_end = pos
           break
         else
           escaped = false
         end
+        pos = pos + 1
       end
       
-      if end_idx and end_idx > start_idx then
-        local text = data_stream:sub(start_idx + 1, end_idx)
-        -- Unescape the JSON string literals
-        text = text:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
-        M.write_string_at_cursor(text)
+      if quote_end then
+        local text = input_str:sub(quote_start + 1, quote_end - 1)
+        text = text:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
+        table.insert(chunks, text)
+        start_pos = quote_end + 1
+      else
+        break
       end
     end
+    
+    return chunks
   end
+  
+  local chunks = extract_text_chunks(data_stream)
+  if #chunks > 0 then
+    for _, chunk in ipairs(chunks) do
+      M.write_string_at_cursor(chunk)
+    end
+    return
+  end
+  
+  -- Fourth approach: Try to extract raw text content without JSON parsing
+  -- This is a fallback method for malformed responses
+  local plaintext = data_stream:gsub('^%s*{.*"text"%s*:%s*"(.-)"%s*}%s*$', '%1')
+  if plaintext ~= data_stream then
+    plaintext = plaintext:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
+    M.write_string_at_cursor(plaintext)
+    return
+  end
+  
+  -- Final fallback: Log that we couldn't parse the response
+  M.log_debug("Could not extract text from Gemini response: " .. data_stream)
 end
 
 local group = vim.api.nvim_create_augroup('LLM_AutoGroup', { clear = true })
@@ -430,6 +485,7 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   
   local curr_event_state = nil
   local stderr_lines = {}
+  local buffer = ""  -- Buffer for accumulating partial JSON responses
 
   local function parse_and_call(line)
     -- Check for Anthropic event markers
@@ -439,15 +495,30 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       return
     end
     
-    -- Check for data lines
+    -- Check for data lines in SSE format
     local data_match = line:match('^data: (.+)$')
     if data_match then
       handle_data_fn(data_match, curr_event_state)
       return
     end
     
-    -- For Gemini API which may not use SSE format
-    handle_data_fn(line, curr_event_state)
+    -- Special handling for Gemini API
+    -- Look for complete JSON objects
+    buffer = buffer .. line
+    
+    -- Check if we have a complete JSON object
+    if buffer:match("^%s*{") and buffer:match("}%s*$") then
+      handle_data_fn(buffer, curr_event_state)
+      buffer = ""  -- Reset buffer after handling
+    else
+      -- For non-JSON lines or incomplete JSON objects
+      if not buffer:match("^%s*{") then
+        -- If not the start of a JSON object, process directly
+        handle_data_fn(line, curr_event_state)
+        buffer = ""  -- Reset buffer
+      end
+      -- Otherwise continue accumulating for an incomplete JSON object
+    end
   end
 
   if active_job then
@@ -472,6 +543,11 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       end
     end,
     on_exit = function(_, exit_code)
+      -- Process any remaining buffer content
+      if buffer ~= "" then
+        handle_data_fn(buffer, curr_event_state)
+      end
+      
       if exit_code ~= 0 then
         vim.schedule(function()
           local err_msg = "LLM request failed with exit code: " .. exit_code
