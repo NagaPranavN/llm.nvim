@@ -241,7 +241,7 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
   end
   
   local model = opts.model or "gemini-2.0-flash"
-  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model .. ":generateContent?key=" .. api_key
+  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model .. ":streamGenerateContent?key=" .. api_key
   
   local data = {
     contents = {
@@ -347,21 +347,48 @@ function M.handle_openai_spec_data(data_stream)
   end
 end
 
--- Handle Gemini API response
+-- Handle Gemini API response with improved parsing
 function M.handle_gemini_spec_data(data_stream)
   M.log_debug("Received Gemini data: " .. data_stream)
   
-  local ok, json = pcall(vim.json.decode, data_stream)
-  if ok then
-    -- Check for different response formats
-    if json.candidates and json.candidates[1] and json.candidates[1].content then
-      local parts = json.candidates[1].content.parts
-      if parts and parts[1] and parts[1].text then
-        M.write_string_at_cursor(parts[1].text)
+  -- Buffer to accumulate JSON data
+  local gemini_buffer = ""
+  
+  -- Process complete JSON objects
+  if data_stream then
+    -- Sometimes Gemini returns multiple JSON objects in one stream
+    -- or partial objects that need to be accumulated
+    gemini_buffer = gemini_buffer .. data_stream
+    
+    -- Try parsing different parts of the response to extract text content
+    local text = nil
+    
+    -- First approach: Try to parse the complete JSON
+    local ok, json = pcall(vim.json.decode, gemini_buffer)
+    if ok then
+      -- Extract text from a complete response
+      if json.candidates and json.candidates[1] and json.candidates[1].content then
+        local parts = json.candidates[1].content.parts
+        if parts and parts[1] and parts[1].text then
+          text = parts[1].text
+        end
+      end
+      
+      -- Reset buffer after successful parse
+      gemini_buffer = ""
+    else
+      -- Second approach: Try to extract text using pattern matching
+      -- Look for text field in stream
+      local text_match = data_stream:match('"text":%s*"([^"]+)"')
+      if text_match then
+        text = text_match:gsub("\\n", "\n"):gsub("\\\"", "\""):gsub("\\\\", "\\")
       end
     end
-  elseif not ok then
-    M.log_debug("Failed to parse Gemini JSON: " .. data_stream)
+    
+    -- Write the extracted text if found
+    if text then
+      M.write_string_at_cursor(text)
+    end
   end
 end
 
@@ -407,10 +434,8 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       return
     end
     
-    -- For Gemini API which doesn't use SSE format
-    if line:match('{') then
-      handle_data_fn(line, curr_event_state)
-    end
+    -- For Gemini API which may not use SSE format
+    handle_data_fn(line, curr_event_state)
   end
 
   if active_job then
