@@ -64,6 +64,7 @@ end
 local debug_buffer = nil
 local debug_window = nil
 local debug_log_queue = {}
+local debug_window_visible = false
 
 -- Function to safely create debug window (only called in UI context)
 function M.create_debug_window()
@@ -91,6 +92,10 @@ function M.create_debug_window()
     
     -- Return to the original window
     vim.api.nvim_set_current_win(current_win)
+    
+    -- Set window as visible
+    debug_window_visible = true
+    vim.notify("LLM Debug window opened", vim.log.levels.INFO)
   end
   
   -- Process any queued messages
@@ -116,6 +121,18 @@ function M.create_debug_window()
   end
   
   return debug_buffer
+end
+
+-- Close the debug window
+function M.close_debug_window()
+  if debug_window and vim.api.nvim_win_is_valid(debug_window) then
+    vim.api.nvim_win_close(debug_window, true)
+    debug_window = nil
+    debug_window_visible = false
+    vim.notify("LLM Debug window closed", vim.log.levels.INFO)
+    return true
+  end
+  return false
 end
 
 -- Safe debug logging function that can be used in any context
@@ -153,14 +170,18 @@ function M.log_debug(message)
   end)
 end
 
--- Command to toggle debug window
+-- Improved toggle debug window function
 function M.toggle_debug_window()
-  if debug_window and vim.api.nvim_win_is_valid(debug_window) then
-    vim.api.nvim_win_close(debug_window, true)
-    debug_window = nil
+  if debug_window_visible then
+    M.close_debug_window()
   else
     M.create_debug_window()
   end
+end
+
+-- Get debug window status
+function M.get_debug_window_status()
+  return debug_window_visible
 end
 
 -- OpenAI API integration
@@ -465,9 +486,18 @@ local active_job = nil
 function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_data_fn)
   vim.api.nvim_clear_autocmds({ group = group })
   
-  -- Ensure debug buffer is created
+  -- Ensure debug buffer is created (but only make visible if debug mode is active)
   vim.schedule(function()
-    M.create_debug_window()
+    if debug_window_visible then
+      M.create_debug_window()
+    else
+      -- Just ensure the buffer exists without showing it
+      if not debug_buffer or not vim.api.nvim_buf_is_valid(debug_buffer) then
+        debug_buffer = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_option(debug_buffer, "bufhidden", "hide")
+        vim.api.nvim_buf_set_name(debug_buffer, "LLM Debug Log")
+      end
+    end
   end)
   
   local prompt = get_prompt(opts)
@@ -600,6 +630,14 @@ end
 vim.api.nvim_create_user_command('LLMDebugToggle', function()
   M.toggle_debug_window()
 end, { desc = 'Toggle LLM debug window' })
+
+vim.api.nvim_create_user_command('LLMDebugShow', function()
+  M.create_debug_window()
+end, { desc = 'Show LLM debug window' })
+
+vim.api.nvim_create_user_command('LLMDebugHide', function()
+  M.close_debug_window()
+end, { desc = 'Hide LLM debug window' })
 
 vim.api.nvim_create_user_command('LLMDebugClear', function()
   if debug_buffer and vim.api.nvim_buf_is_valid(debug_buffer) then
