@@ -60,7 +60,7 @@ function M.get_visual_selection()
   return {}
 end
 
--- Enhanced debug logging
+-- Enhanced debug logging with structured output
 local debug_buffer = nil
 local debug_window = nil
 local debug_log_queue = {}
@@ -88,7 +88,7 @@ function M.create_debug_window()
     vim.api.nvim_win_set_buf(debug_window, debug_buffer)
     
     -- Set window height
-    vim.api.nvim_win_set_height(debug_window, 10)
+    vim.api.nvim_win_set_height(debug_window, 15)
     
     -- Return to the original window
     vim.api.nvim_set_current_win(current_win)
@@ -135,10 +135,12 @@ function M.close_debug_window()
   return false
 end
 
--- Safe debug logging function that can be used in any context
-function M.log_debug(message)
+-- Structured logging function with different log levels
+function M.log_debug(message, level, category)
+  level = level or "INFO"
+  category = category or "GENERAL"
   local timestamp = os.date("%H:%M:%S")
-  local formatted_message = "[" .. timestamp .. "] " .. message
+  local formatted_message = string.format("[%s] [%s] [%s] %s", timestamp, level, category, message)
   
   -- Queue the message
   table.insert(debug_log_queue, formatted_message)
@@ -170,6 +172,19 @@ function M.log_debug(message)
   end)
 end
 
+-- Helper functions for different log levels
+function M.log_info(message, category)
+  M.log_debug(message, "INFO", category)
+end
+
+function M.log_warning(message, category)
+  M.log_debug(message, "WARN", category)
+end
+
+function M.log_error(message, category)
+  M.log_debug(message, "ERROR", category)
+end
+
 -- Improved toggle debug window function
 function M.toggle_debug_window()
   if debug_window_visible then
@@ -184,12 +199,21 @@ function M.get_debug_window_status()
   return debug_window_visible
 end
 
+-- Helper function to safely log request data without exposing API keys
+local function safe_log_request_data(data, provider)
+  local safe_data = vim.deepcopy(data)
+  -- Don't log the actual request data as it might contain sensitive info
+  M.log_info(string.format("Request prepared for %s with model: %s", provider, safe_data.model or "unknown"), "API")
+  M.log_info(string.format("Max tokens: %d", safe_data.max_tokens or 4096), "API")
+end
+
 -- OpenAI API integration
 function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
   local url = opts.url
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
   
   if not api_key then
+    M.log_error("Failed to get API key for " .. (opts.api_key_name or "unknown"), "AUTH")
     return nil
   end
   
@@ -203,8 +227,8 @@ function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
     max_tokens = opts.max_tokens or 4096
   }
   
+  safe_log_request_data(data, "OpenAI")
   local encoded_data = vim.json.encode(data)
-  M.log_debug("OpenAI request data: " .. vim.inspect(data))
   
   local args = {
     '-N',
@@ -212,10 +236,10 @@ function M.make_openai_spec_curl_args(opts, prompt, system_prompt)
     '-H', 'Content-Type: application/json',
     '-H', 'Authorization: Bearer ' .. api_key,
     '-d', encoded_data,
-    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
+  M.log_info("OpenAI curl arguments prepared", "API")
   return args
 end
 
@@ -225,6 +249,7 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
   
   if not api_key then
+    M.log_error("Failed to get API key for " .. (opts.api_key_name or "unknown"), "AUTH")
     return nil
   end
   
@@ -236,8 +261,8 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
     max_tokens = opts.max_tokens or 4096,
   }
   
+  safe_log_request_data(data, "Anthropic")
   local encoded_data = vim.json.encode(data)
-  M.log_debug("Anthropic request data: " .. vim.inspect(data))
   
   local args = {
     '-N',
@@ -246,23 +271,25 @@ function M.make_anthropic_spec_curl_args(opts, prompt, system_prompt)
     '-H', 'x-api-key: ' .. api_key,
     '-H', 'anthropic-version: 2023-06-01',
     '-d', encoded_data,
-    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
+  M.log_info("Anthropic curl arguments prepared", "API")
   return args
 end
 
--- Improved Gemini API integration
+-- Fixed Gemini API integration
 function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
   local api_key = opts.api_key_name and get_api_key(opts.api_key_name)
   
   if not api_key then
+    M.log_error("Failed to get API key for " .. (opts.api_key_name or "unknown"), "AUTH")
     return nil
   end
   
   local model = opts.model or "gemini-2.0-flash"
-  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model .. ":streamGenerateContent?key=" .. api_key
+  -- Use the correct streaming endpoint
+  local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. model .. ":streamGenerateContent?alt=sse&key=" .. api_key
   
   local data = {
     contents = {
@@ -283,18 +310,19 @@ function M.make_gemini_spec_curl_args(opts, prompt, system_prompt)
     }
   }
   
+  safe_log_request_data(data, "Gemini")
   local encoded_data = vim.json.encode(data)
-  M.log_debug("Gemini request data: " .. vim.inspect(data))
   
   local args = {
     '-N',
     '-X', 'POST',
     '-H', 'Content-Type: application/json',
+    '-H', 'Accept: text/event-stream',
     '-d', encoded_data,
-    '-v', -- Add verbose flag for more detailed error information
     url
   }
   
+  M.log_info("Gemini curl arguments prepared with streaming endpoint", "API")
   return args
 end
 
@@ -339,145 +367,94 @@ end
 
 -- Handle Anthropic API response
 function M.handle_anthropic_spec_data(data_stream, event_state)
-  M.log_debug("Received Anthropic data: " .. data_stream)
+  M.log_info("Received data, event: " .. (event_state or "none"), "ANTHROPIC")
   
   if event_state == 'content_block_delta' then
     local ok, json = pcall(vim.json.decode, data_stream)
     if ok and json.delta and json.delta.text then
+      M.log_info("Writing text: " .. string.sub(json.delta.text, 1, 50) .. "...", "ANTHROPIC")
       M.write_string_at_cursor(json.delta.text)
     elseif not ok then
-      M.log_debug("Failed to parse Anthropic JSON: " .. data_stream)
+      M.log_error("Failed to parse JSON: " .. string.sub(data_stream, 1, 100), "ANTHROPIC")
     end
   end
 end
 
 -- Handle OpenAI API response
 function M.handle_openai_spec_data(data_stream)
-  M.log_debug("Received OpenAI data: " .. data_stream)
+  M.log_info("Received data", "OPENAI")
   
   if data_stream:match('"delta":') then
     local ok, json = pcall(vim.json.decode, data_stream)
     if ok and json.choices and json.choices[1] and json.choices[1].delta then
       local content = json.choices[1].delta.content
       if content then
+        M.log_info("Writing text: " .. string.sub(content, 1, 50) .. "...", "OPENAI")
         M.write_string_at_cursor(content)
       end
     elseif not ok then
-      M.log_debug("Failed to parse OpenAI JSON: " .. data_stream)
+      M.log_error("Failed to parse JSON: " .. string.sub(data_stream, 1, 100), "OPENAI")
     end
   end
 end
 
--- Completely rewritten Gemini API response handler with robust text extraction
+-- Improved Gemini API response handler
 function M.handle_gemini_spec_data(data_stream)
-  M.log_debug("Received Gemini data: " .. data_stream)
+  M.log_info("Received data: " .. string.sub(data_stream, 1, 100), "GEMINI")
   
-  -- Skip empty lines
+  -- Skip empty lines and DONE markers
   if data_stream == nil or data_stream == "" or data_stream == "[DONE]" then
+    M.log_info("Skipping empty or DONE marker", "GEMINI")
     return
   end
   
-  -- First approach: Try standard JSON parsing
+  -- Handle SSE format
+  if data_stream:match("^data: ") then
+    local json_data = data_stream:gsub("^data: ", "")
+    if json_data == "" or json_data == "[DONE]" then
+      M.log_info("Stream ended", "GEMINI")
+      return
+    end
+    
+    local ok, json = pcall(vim.json.decode, json_data)
+    if ok and json.candidates and json.candidates[1] then
+      local candidate = json.candidates[1]
+      if candidate.content and candidate.content.parts and candidate.content.parts[1] then
+        local text = candidate.content.parts[1].text
+        if text then
+          M.log_info("Writing SSE text: " .. string.sub(text, 1, 50) .. "...", "GEMINI")
+          M.write_string_at_cursor(text)
+          return
+        end
+      end
+    else
+      M.log_warning("Could not parse SSE JSON or no content found", "GEMINI")
+    end
+  end
+  
+  -- Handle regular JSON format
   local ok, json = pcall(vim.json.decode, data_stream)
   if ok then
-    -- Process properly formatted JSON response
     if json.candidates and json.candidates[1] and json.candidates[1].content then
       local parts = json.candidates[1].content.parts
       if parts and parts[1] and parts[1].text then
         local text = parts[1].text
-        -- Clean up text - remove leading/trailing quotes if present
-        text = text:gsub('^%s*"(.-)"%s*$', '%1')
-        -- Unescape any JSON escapes
-        text = text:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
+        M.log_info("Writing JSON text: " .. string.sub(text, 1, 50) .. "...", "GEMINI")
         M.write_string_at_cursor(text)
         return
       end
     end
     
-    -- Check if it's a different JSON format
-    if json.text then
-      local text = json.text
-      text = text:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
-      M.write_string_at_cursor(text)
+    -- Check for error messages
+    if json.error then
+      M.log_error("API Error: " .. (json.error.message or "Unknown error"), "GEMINI")
+      vim.notify("Gemini API Error: " .. (json.error.message or "Unknown error"), vim.log.levels.ERROR)
       return
     end
   end
   
-  -- Second approach: Extract text field using JSON path extraction
-  local text_pattern = '"text"%s*:%s*"(.-[^\\])"'
-  local text_match = data_stream:match(text_pattern)
-  if text_match then
-    -- Unescape the JSON string literals
-    local text = text_match:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
-    M.write_string_at_cursor(text)
-    return
-  end
-  
-  -- Third approach: Handle multiple chunks by finding text patterns
-  -- This handles cases where the response has multiple text chunks or is malformed
-  local function extract_text_chunks(input_str)
-    local chunks = {}
-    local start_pos = 1
-    
-    while true do
-      local text_start = input_str:find('"text"', start_pos, true)
-      if not text_start then break end
-      
-      local colon_pos = input_str:find(':', text_start, true)
-      if not colon_pos then break end
-      
-      local quote_start = input_str:find('"', colon_pos + 1, true)
-      if not quote_start then break end
-      
-      local quote_end = nil
-      local pos = quote_start + 1
-      local escaped = false
-      
-      while pos <= #input_str do
-        local char = input_str:sub(pos, pos)
-        if char == '\\' then
-          escaped = not escaped
-        elseif char == '"' and not escaped then
-          quote_end = pos
-          break
-        else
-          escaped = false
-        end
-        pos = pos + 1
-      end
-      
-      if quote_end then
-        local text = input_str:sub(quote_start + 1, quote_end - 1)
-        text = text:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
-        table.insert(chunks, text)
-        start_pos = quote_end + 1
-      else
-        break
-      end
-    end
-    
-    return chunks
-  end
-  
-  local chunks = extract_text_chunks(data_stream)
-  if #chunks > 0 then
-    for _, chunk in ipairs(chunks) do
-      M.write_string_at_cursor(chunk)
-    end
-    return
-  end
-  
-  -- Fourth approach: Try to extract raw text content without JSON parsing
-  -- This is a fallback method for malformed responses
-  local plaintext = data_stream:gsub('^%s*{.*"text"%s*:%s*"(.-)"%s*}%s*$', '%1')
-  if plaintext ~= data_stream then
-    plaintext = plaintext:gsub('\\n', '\n'):gsub('\\"', '"'):gsub('\\\\', '\\')
-    M.write_string_at_cursor(plaintext)
-    return
-  end
-  
-  -- Final fallback: Log that we couldn't parse the response
-  M.log_debug("Could not extract text from Gemini response: " .. data_stream)
+  -- If we get here, we couldn't parse the response
+  M.log_warning("Could not extract text from response", "GEMINI")
 end
 
 local group = vim.api.nvim_create_augroup('LLM_AutoGroup', { clear = true })
@@ -503,25 +480,33 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
   local prompt = get_prompt(opts)
   local system_prompt = opts.system_prompt or 'You are a helpful assistant.'
   
-  M.log_debug("Starting LLM request with model: " .. (opts.model or "unknown"))
-  M.log_debug("API endpoint: " .. (opts.url or "unknown"))
+  M.log_info("=== Starting LLM Request ===", "REQUEST")
+  M.log_info("Model: " .. (opts.model or "unknown"), "REQUEST")
+  M.log_info("URL: " .. (opts.url or "constructed dynamically"), "REQUEST")
+  M.log_info("Prompt length: " .. #prompt .. " chars", "REQUEST")
+  M.log_info("System prompt length: " .. #system_prompt .. " chars", "REQUEST")
   
   local args = make_curl_args_fn(opts, prompt, system_prompt)
   
   if not args then
-    M.log_debug("Failed to create curl arguments. Check API key.")
+    M.log_error("Failed to create curl arguments. Check API key.", "REQUEST")
     return
   end
   
   local curr_event_state = nil
   local stderr_lines = {}
   local buffer = ""  -- Buffer for accumulating partial JSON responses
+  local response_count = 0
 
   local function parse_and_call(line)
+    response_count = response_count + 1
+    M.log_info("Response #" .. response_count .. ": " .. string.sub(line, 1, 100), "RESPONSE")
+    
     -- Check for Anthropic event markers
     local event = line:match('^event: (.+)$')
     if event then
       curr_event_state = event
+      M.log_info("Event state changed to: " .. event, "RESPONSE")
       return
     end
     
@@ -563,13 +548,16 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
     command = 'curl',
     args = args,
     on_stdout = function(_, out)
-      M.log_debug("STDOUT: " .. out)
+      M.log_info("STDOUT: " .. string.sub(out, 1, 100), "CURL")
       parse_and_call(out)
     end,
     on_stderr = function(_, err)
       if err and err ~= "" then
-        table.insert(stderr_lines, err)
-        M.log_debug("STDERR: " .. err)
+        -- Only log important stderr messages, not curl progress
+        if not err:match("^%s*[%%*]") and not err:match("^%s*{") and not err:match("^%s*<") then
+          table.insert(stderr_lines, err)
+          M.log_warning("STDERR: " .. err, "CURL")
+        end
       end
     end,
     on_exit = function(_, exit_code)
@@ -577,6 +565,10 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       if buffer ~= "" then
         handle_data_fn(buffer, curr_event_state)
       end
+      
+      M.log_info("=== Request Completed ===", "REQUEST")
+      M.log_info("Exit code: " .. exit_code, "REQUEST")
+      M.log_info("Total responses: " .. response_count, "REQUEST")
       
       if exit_code ~= 0 then
         vim.schedule(function()
@@ -586,13 +578,10 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
           end
           
           vim.notify(err_msg, vim.log.levels.ERROR)
-          M.log_debug("Request failed: " .. err_msg)
-          
-          -- Show detailed error in debug window
-          M.log_debug("Curl command: curl " .. table.concat(args, " "))
+          M.log_error("Request failed: " .. err_msg, "REQUEST")
         end)
       else
-        M.log_debug("Request completed successfully")
+        M.log_info("Request completed successfully", "REQUEST")
       end
       
       vim.schedule(function()
@@ -617,6 +606,7 @@ function M.invoke_llm_and_stream_into_editor(opts, make_curl_args_fn, handle_dat
       if active_job then
         active_job:shutdown()
         vim.api.nvim_echo({ { "LLM streaming cancelled", "WarningMsg" } }, false, {})
+        M.log_warning("Request cancelled by user", "REQUEST")
         active_job = nil
       end
     end,
@@ -644,7 +634,7 @@ vim.api.nvim_create_user_command('LLMDebugClear', function()
     vim.api.nvim_buf_set_option(debug_buffer, "modifiable", true)
     vim.api.nvim_buf_set_lines(debug_buffer, 0, -1, false, {})
     vim.api.nvim_buf_set_option(debug_buffer, "modifiable", false)
-    M.log_debug("Debug log cleared")
+    M.log_info("Debug log cleared", "SYSTEM")
   end
 end, { desc = 'Clear LLM debug log' })
 
